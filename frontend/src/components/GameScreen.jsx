@@ -1,30 +1,124 @@
 // src/components/GameScreen.jsx
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useGameVoice } from "../hooks/useGameVoice";
 import { renderGame } from "../game/renderer";
 
 const ITEM_ICONS = { boost: "⚡", bomb: "💣", shield: "🛡️", missile: "🚀" };
+const MINIMAP_STORAGE_KEY = "kart_show_minimap";
 
-export default function GameScreen({ gameState, myId, send, onLeave }) {
+function useNeedsLandscapeLock() {
+  const [blocked, setBlocked] = useState(false);
+
+  useEffect(() => {
+    const portraitMq = window.matchMedia("(orientation: portrait)");
+    const narrowMq = window.matchMedia("(max-width: 896px)");
+    const coarseMq = window.matchMedia("(pointer: coarse)");
+    const update = () => {
+      const portrait = portraitMq.matches;
+      const phoneLike = narrowMq.matches || coarseMq.matches;
+      setBlocked(portrait && phoneLike);
+    };
+    update();
+    portraitMq.addEventListener("change", update);
+    narrowMq.addEventListener("change", update);
+    coarseMq.addEventListener("change", update);
+    window.addEventListener("resize", update);
+    return () => {
+      portraitMq.removeEventListener("change", update);
+      narrowMq.removeEventListener("change", update);
+      coarseMq.removeEventListener("change", update);
+      window.removeEventListener("resize", update);
+    };
+  }, []);
+
+  return blocked;
+}
+
+export default function GameScreen({ gameState, myId, send, onLeave, registerWsHandler }) {
   const canvasRef = useRef(null);
+  const canvasWrapRef = useRef(null);
   const keysRef = useRef({});
   const animRef = useRef(null);
   const cameraRef = useRef({ x: 0, y: 0 });
   const prevKeysRef = useRef({});
   const [minimap, setMinimap] = useState([]);
-
-  const ARENA_W = 1200, ARENA_H = 800;
-
-  // Resize canvas
-  useEffect(() => {
-    function resize() {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      canvas.width = Math.min(window.innerWidth, 1280);
-      canvas.height = Math.min(window.innerHeight - 60, 720);
+  const [showMinimap, setShowMinimap] = useState(() => {
+    try {
+      return localStorage.getItem(MINIMAP_STORAGE_KEY) !== "0";
+    } catch {
+      return true;
     }
-    resize();
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
+  });
+  const portraitBlock = useNeedsLandscapeLock();
+
+  const [micMuted, setMicMuted] = useState(false);
+  const [deafened, setDeafened] = useState(false);
+
+  const peerIds = useMemo(() => {
+    const ids = (gameState?.players || []).map((p) => p.id).filter((id) => id !== myId);
+    return [...new Set(ids)].sort();
+  }, [gameState?.players, myId]);
+
+  const voiceEnabled =
+    !!(gameState && (gameState.state === "playing" || gameState.state === "finished") && peerIds.length > 0);
+
+  const { voiceError, voiceActive } = useGameVoice({
+    myId,
+    peerIds,
+    enabled: voiceEnabled,
+    micMuted,
+    deafened,
+    send,
+    registerWsHandler,
+  });
+
+  function toggleMinimap() {
+    setShowMinimap((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem(MINIMAP_STORAGE_KEY, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
+
+  const ARENA_W = 1200;
+  const ARENA_H = 800;
+
+  // Prefer landscape on phones (best-effort; may require user gesture / HTTPS)
+  useEffect(() => {
+    (async () => {
+      try {
+        const o = screen.orientation;
+        if (o && typeof o.lock === "function") await o.lock("landscape-primary");
+      } catch {
+        /* not supported or denied */
+      }
+    })();
+    return () => {
+      try {
+        screen.orientation?.unlock?.();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, []);
+
+  // Size canvas to the flex arena (responsive)
+  useEffect(() => {
+    const wrap = canvasWrapRef.current;
+    const canvas = canvasRef.current;
+    if (!wrap || !canvas) return;
+    const ro = new ResizeObserver(() => {
+      const w = Math.max(1, Math.floor(wrap.clientWidth));
+      const h = Math.max(1, Math.floor(wrap.clientHeight));
+      canvas.width = w;
+      canvas.height = h;
+    });
+    ro.observe(wrap);
+    return () => ro.disconnect();
   }, []);
 
   // Key handling
@@ -59,12 +153,31 @@ export default function GameScreen({ gameState, myId, send, onLeave }) {
     };
   }, []);
 
-  // Send keys throttled
+  // Send keys throttled (touch / coarse pointers: always send gas + left/right/use)
   useEffect(() => {
     const interval = setInterval(() => {
-      const curr = { ...keysRef.current };
+      const raw = { ...keysRef.current };
+      const coarse =
+        typeof window !== "undefined" &&
+        window.matchMedia("(pointer: coarse)").matches;
+      const curr = coarse
+        ? {
+            up: true,
+            down: !!raw.down,
+            left: !!raw.left,
+            right: !!raw.right,
+            use: !!raw.use,
+          }
+        : {
+            up: !!raw.up,
+            down: !!raw.down,
+            left: !!raw.left,
+            right: !!raw.right,
+            use: !!raw.use,
+          };
       const prev = prevKeysRef.current;
-      const changed = Object.keys(curr).some((k) => curr[k] !== prev[k]) ||
+      const changed =
+        Object.keys(curr).some((k) => curr[k] !== prev[k]) ||
         Object.keys(prev).some((k) => curr[k] !== prev[k]);
       if (changed) {
         send({ type: "keys", keys: curr });
@@ -96,13 +209,70 @@ export default function GameScreen({ gameState, myId, send, onLeave }) {
   const me = gameState?.players?.find((p) => p.id === myId);
   const sorted = [...(gameState?.players || [])].sort((a, b) => b.score - a.score);
 
-  // Touch controls
-  function handleTouch(dir, active) {
+  function setTouchDir(dir, active) {
     keysRef.current[dir] = active;
   }
 
+  function releaseSteerTouch() {
+    keysRef.current.left = false;
+    keysRef.current.right = false;
+  }
+
+  const dpadBind = (dir) => ({
+    onPointerDown: (e) => {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setTouchDir(dir, true);
+    },
+    onPointerUp: (e) => {
+      setTouchDir(dir, false);
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    },
+    onPointerCancel: () => setTouchDir(dir, false),
+    onLostPointerCapture: () => setTouchDir(dir, false),
+  });
+
+  const useBind = {
+    onPointerDown: (e) => {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setTouchDir("use", true);
+    },
+    onPointerUp: (e) => {
+      setTouchDir("use", false);
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    },
+    onPointerCancel: () => setTouchDir("use", false),
+    onLostPointerCapture: () => setTouchDir("use", false),
+  };
+
   return (
     <div className="game-screen">
+      {portraitBlock && (
+        <div className="rotate-device-overlay" role="dialog" aria-modal="true" aria-label="Rotate device">
+          <div className="rotate-device-card">
+            <div className="rotate-device-kart" aria-hidden>
+              <div className="rotate-device-kart-inner">
+                <span className="rotate-kart__body" />
+                <span className="rotate-kart__wing rotate-kart__wing--l" />
+                <span className="rotate-kart__wing rotate-kart__wing--r" />
+              </div>
+            </div>
+            <h2 className="rotate-device-title">Rotate to landscape</h2>
+            <p className="rotate-device-hint">
+              KartClash is built for wide screens. Turn your phone sideways for the full arena.
+            </p>
+            <div className="rotate-device-icon" aria-hidden>↻</div>
+          </div>
+        </div>
+      )}
+
       {/* HUD top bar */}
       <div className="hud-bar">
         <div className="hud-left">
@@ -135,12 +305,72 @@ export default function GameScreen({ gameState, myId, send, onLeave }) {
         </div>
 
         <div className="hud-right">
-          <button className="btn btn-sm btn-ghost" onClick={onLeave}>⏸ Leave</button>
+          {voiceEnabled && (
+            <div className="hud-voice" role="group" aria-label="Voice chat">
+              <button
+                type="button"
+                className={`btn btn-sm hud-voice-btn ${micMuted ? "hud-voice-btn--off" : ""}`}
+                onClick={() => setMicMuted((v) => !v)}
+                aria-pressed={micMuted}
+                title={micMuted ? "Unmute microphone" : "Mute microphone"}
+              >
+                <span aria-hidden>{micMuted ? "🔇" : "🎙️"}</span>
+                <span className="hud-voice-btn__lbl">{micMuted ? "Mic off" : "Mic"}</span>
+              </button>
+              <button
+                type="button"
+                className={`btn btn-sm hud-voice-btn ${deafened ? "hud-voice-btn--off" : ""}`}
+                onClick={() => setDeafened((v) => !v)}
+                aria-pressed={deafened}
+                title={deafened ? "Unmute others" : "Mute others (can't hear team)"}
+              >
+                <span aria-hidden>{deafened ? "🚫" : "🔊"}</span>
+                <span className="hud-voice-btn__lbl">{deafened ? "Mute all" : "Hear"}</span>
+              </button>
+              {voiceError && (
+                <span className="hud-voice-err" title={voiceError}>
+                  ⚠️ Voice
+                </span>
+              )}
+              {!voiceError && voiceActive && (
+                <span className="hud-voice-live" title="Voice connected">
+                  ●
+                </span>
+              )}
+            </div>
+          )}
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost hud-map-toggle"
+            onClick={toggleMinimap}
+            aria-pressed={showMinimap}
+            aria-label={showMinimap ? "Hide minimap" : "Show minimap"}
+            title={showMinimap ? "Hide minimap" : "Show minimap"}
+          >
+          <span className="hud-map-toggle__icon" aria-hidden>🗺️</span>
+          <span className="hud-map-toggle__txt">{showMinimap ? "On" : "Off"}</span>
+          </button>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onLeave}>⏸ Leave</button>
         </div>
       </div>
 
-      {/* Canvas */}
-      <canvas ref={canvasRef} className="game-canvas" />
+      <div className="game-arena">
+        <div className="game-arena__frame" aria-hidden>
+          <div className="game-arena__grid" />
+          <div className="game-arena__rings" />
+        </div>
+        <div className="game-arena__corner-kart" aria-hidden>
+          <div className="game-arena__corner-kart-spin">
+            <span className="corner-kart__chassis" />
+            <span className="corner-kart__fin" />
+            <span className="corner-kart__wheel corner-kart__wheel--a" />
+            <span className="corner-kart__wheel corner-kart__wheel--b" />
+          </div>
+        </div>
+        <div ref={canvasWrapRef} className="game-canvas-wrap">
+          <canvas ref={canvasRef} className="game-canvas" />
+        </div>
+      </div>
 
       {/* Scoreboard sidebar */}
       <div className="scoreboard">
@@ -156,34 +386,47 @@ export default function GameScreen({ gameState, myId, send, onLeave }) {
         ))}
       </div>
 
-      {/* Minimap */}
-      <div className="minimap">
-        <svg viewBox={`0 0 ${ARENA_W} ${ARENA_H}`} width="160" height="100">
-          <rect x="0" y="0" width={ARENA_W} height={ARENA_H} fill="#0d0d1a" stroke="#FF4757" strokeWidth="20" />
-          {minimap.filter(p => p.alive).map((p) => (
-            <circle
-              key={p.id}
-              cx={p.x} cy={p.y} r={p.id === myId ? 32 : 24}
-              fill={p.color}
-              stroke={p.id === myId ? "#fff" : "none"}
-              strokeWidth="12"
-            />
-          ))}
-        </svg>
-      </div>
-
-      {/* Mobile touch controls */}
-      <div className="touch-controls">
-        <div className="dpad">
-          <button className="dpad-btn dpad-up" onPointerDown={() => handleTouch("up", true)} onPointerUp={() => handleTouch("up", false)}>▲</button>
-          <div className="dpad-mid">
-            <button className="dpad-btn" onPointerDown={() => handleTouch("left", true)} onPointerUp={() => handleTouch("left", false)}>◀</button>
-            <button className="dpad-btn" onPointerDown={() => handleTouch("down", true)} onPointerUp={() => handleTouch("down", false)}>▼</button>
-            <button className="dpad-btn" onPointerDown={() => handleTouch("right", true)} onPointerUp={() => handleTouch("right", false)}>▶</button>
-          </div>
+      {/* Minimap (optional) */}
+      {showMinimap && (
+        <div className="minimap">
+          <svg className="minimap-svg" viewBox={`0 0 ${ARENA_W} ${ARENA_H}`} preserveAspectRatio="xMidYMid meet">
+            <rect x="0" y="0" width={ARENA_W} height={ARENA_H} fill="#0d0d1a" stroke="#FF4757" strokeWidth="20" />
+            {minimap.filter(p => p.alive).map((p) => (
+              <circle
+                key={p.id}
+                cx={p.x} cy={p.y} r={p.id === myId ? 32 : 24}
+                fill={p.color}
+                stroke={p.id === myId ? "#fff" : "none"}
+                strokeWidth="12"
+              />
+            ))}
+          </svg>
         </div>
-        <button className="use-btn" onPointerDown={() => handleTouch("use", true)} onPointerUp={() => handleTouch("use", false)}>
-          USE {me?.item ? ITEM_ICONS[me.item] : "🎁"}
+      )}
+
+      {/* Mobile: invisible left / right halves to steer; USE button only visible control */}
+      <div
+        className="touch-steer-zones"
+        onPointerLeave={releaseSteerTouch}
+      >
+        <div
+          className="steer-zone steer-zone--left"
+          role="button"
+          aria-label="Steer left (hold left side of screen)"
+          {...dpadBind("left")}
+        />
+        <div
+          className="steer-zone steer-zone--right"
+          role="button"
+          aria-label="Steer right (hold right side of screen)"
+          {...dpadBind("right")}
+        />
+      </div>
+      <div className="touch-use-corner">
+        <p className="touch-use-hint" aria-hidden>Item</p>
+        <button type="button" className="use-btn" {...useBind} aria-label="Use item">
+          <span className="use-btn__emoji">{me?.item ? ITEM_ICONS[me.item] : "🎁"}</span>
+          <span className="use-btn__text">USE</span>
         </button>
       </div>
 
@@ -201,7 +444,7 @@ export default function GameScreen({ gameState, myId, send, onLeave }) {
                 </div>
               ))}
             </div>
-            <button className="btn btn-create" onClick={onLeave} style={{ marginTop: 20 }}>
+            <button type="button" className="btn btn-create" onClick={onLeave} style={{ marginTop: 20 }}>
               🏠 Back to Lobby
             </button>
           </div>

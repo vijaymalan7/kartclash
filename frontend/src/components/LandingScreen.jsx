@@ -12,6 +12,15 @@ export default function LandingScreen({ onCreateRoom, onJoinRoom }) {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    try {
+      const hint = sessionStorage.getItem("kart_joincode");
+      if (hint) setCode(hint);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
     if (tab === "browse") {
       apiListRooms().then(setRooms).catch(() => {});
       const t = setInterval(() => apiListRooms().then(setRooms).catch(() => {}), 3000);
@@ -154,11 +163,11 @@ export default function LandingScreen({ onCreateRoom, onJoinRoom }) {
 
         {/* Controls hint */}
         <div className="controls-hint">
-          <span>🕹️ WASD / Arrow Keys to drive</span>
+          <span>🕹️ WASD / Arrows to drive</span>
           <span>·</span>
-          <span>Space to use item</span>
+          <span>Space = item</span>
           <span>·</span>
-          <span>💥 Last kart standing wins!</span>
+          <span>📱 Touch: steer left/right · USE bottom-left · map in HUD</span>
         </div>
       </div>
     </div>

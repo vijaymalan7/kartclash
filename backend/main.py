@@ -131,12 +131,13 @@ def join_room(code: str, body: JoinRoomBody):
     room = rooms.get(code.upper())
     if not room:
         raise HTTPException(404, "Room not found")
+    # Same player reconnecting (e.g. refresh) — allowed in any room state
+    if body.player_id in room["players"]:
+        return {"ok": True}
     if room["state"] != "lobby":
         raise HTTPException(400, "Game already started")
     if len(room["players"]) >= MAX_PLAYERS:
         raise HTTPException(400, "Room is full")
-    if body.player_id in room["players"]:
-        return {"ok": True}  # rejoin
     idx = len(room["players"])
     color = KART_COLORS[idx % len(KART_COLORS)]
     spawn = SPAWN_POINTS[idx % len(SPAWN_POINTS)]
@@ -359,6 +360,7 @@ async def broadcast_lobby(code: str):
     conns = room_connections.get(code, {})
     msg = json.dumps({
         "type": "lobby",
+        "state": room["state"],
         "players": [
             {"id": p["id"], "name": p["name"], "color": p["color"], "ready": p["ready"]}
             for p in room["players"].values()
@@ -385,6 +387,11 @@ async def ws_endpoint(websocket: WebSocket, code: str, player_id: str):
 
     room_connections[code][player_id] = websocket
     await broadcast_lobby(code)
+    if room["state"] in ("playing", "finished"):
+        try:
+            await websocket.send_text(build_state_msg(room))
+        except Exception:
+            pass
 
     try:
         while True:
@@ -430,6 +437,48 @@ async def ws_endpoint(websocket: WebSocket, code: str, player_id: str):
                         await ws.send_text(chat_msg)
                     except Exception:
                         pass
+
+            elif msg_type == "voice_offer":
+                target_id = data.get("to")
+                if isinstance(target_id, str) and target_id in room["players"]:
+                    peer_ws = room_connections.get(code, {}).get(target_id)
+                    if peer_ws:
+                        try:
+                            await peer_ws.send_text(json.dumps({
+                                "type": "voice_offer",
+                                "from": player_id,
+                                "sdp": data.get("sdp"),
+                            }))
+                        except Exception:
+                            pass
+
+            elif msg_type == "voice_answer":
+                target_id = data.get("to")
+                if isinstance(target_id, str) and target_id in room["players"]:
+                    peer_ws = room_connections.get(code, {}).get(target_id)
+                    if peer_ws:
+                        try:
+                            await peer_ws.send_text(json.dumps({
+                                "type": "voice_answer",
+                                "from": player_id,
+                                "sdp": data.get("sdp"),
+                            }))
+                        except Exception:
+                            pass
+
+            elif msg_type == "voice_ice":
+                target_id = data.get("to")
+                if isinstance(target_id, str) and target_id in room["players"]:
+                    peer_ws = room_connections.get(code, {}).get(target_id)
+                    if peer_ws:
+                        try:
+                            await peer_ws.send_text(json.dumps({
+                                "type": "voice_ice",
+                                "from": player_id,
+                                "candidate": data.get("candidate"),
+                            }))
+                        except Exception:
+                            pass
 
     except WebSocketDisconnect:
         pass

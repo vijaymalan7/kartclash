@@ -37,20 +37,37 @@ export function renderGame(ctx, gameState, myId, cameraRef) {
 
   const cw = ctx.canvas.width;
   const ch = ctx.canvas.height;
+  const time = Date.now() / 1000;
 
   ctx.save();
   ctx.translate(-camX, -camY);
 
-  // ── Background ──────────────────────────────────────────────
-  // Checkered race floor
+  // ── Background — checker floor + depth tint + moving spotlight ──
   const tileSize = 80;
   for (let tx = 0; tx < ARENA_W; tx += tileSize) {
     for (let ty = 0; ty < ARENA_H; ty += tileSize) {
       const isLight = (Math.floor(tx / tileSize) + Math.floor(ty / tileSize)) % 2 === 0;
-      ctx.fillStyle = isLight ? "#1a1a2e" : "#16213e";
+      const depth = ty / ARENA_H;
+      let c1 = isLight ? "#1a1a2e" : "#16213e";
+      let c2 = isLight ? "#141428" : "#121c32";
+      ctx.fillStyle = depth > 0.55 ? c2 : c1;
       ctx.fillRect(tx, ty, tileSize, tileSize);
     }
   }
+
+  const depthShade = ctx.createLinearGradient(0, 0, 0, ARENA_H);
+  depthShade.addColorStop(0, "rgba(255,255,255,0.06)");
+  depthShade.addColorStop(1, "rgba(0,0,0,0.22)");
+  ctx.fillStyle = depthShade;
+  ctx.fillRect(0, 0, ARENA_W, ARENA_H);
+  const spotX = ARENA_W * 0.5 + Math.sin(time * 0.35) * 120;
+  const spotY = ARENA_H * 0.45 + Math.cos(time * 0.28) * 80;
+  const spot = ctx.createRadialGradient(spotX, spotY, 40, spotX, spotY, 420);
+  spot.addColorStop(0, "rgba(255, 71, 87, 0.09)");
+  spot.addColorStop(0.45, "rgba(30, 144, 255, 0.04)");
+  spot.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = spot;
+  ctx.fillRect(0, 0, ARENA_W, ARENA_H);
 
   // Arena border glow
   ctx.strokeStyle = "#FF4757";
@@ -144,16 +161,17 @@ export function renderGame(ctx, gameState, myId, cameraRef) {
   players.forEach((p) => {
     if (!p.alive) return;
     ctx.save();
-    ctx.translate(p.x, p.y);
+    const bob = Math.sin(time * 4 + p.x * 0.01 + p.y * 0.01) * 1.2;
+    ctx.translate(p.x, p.y + bob);
     ctx.rotate(p.angle);
 
     const isMe = p.id === myId;
     const r = 18;
 
-    // Shadow
+    // Shadow (offset for fake height)
     ctx.beginPath();
-    ctx.ellipse(3, 5, r + 2, r - 4, 0, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.ellipse(4, 7, r + 4, r - 2, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.38)";
     ctx.fill();
 
     // Shield aura
@@ -179,31 +197,53 @@ export function renderGame(ctx, gameState, myId, cameraRef) {
       }
     }
 
-    // Kart body
-    const grad = ctx.createRadialGradient(-4, -4, 2, 0, 0, r);
-    grad.addColorStop(0, lighten(p.color, 40));
-    grad.addColorStop(1, p.color);
+    // Side skirt (dark, "3D" lower body)
     ctx.beginPath();
-    ctx.roundRect(-r, -r + 4, r * 2, r * 2 - 8, 6);
+    ctx.roundRect(-r + 1, -r + 9, r * 2 - 2, r * 2 - 14, 5);
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fill();
+
+    // Kart top body — beveled gradient
+    const grad = ctx.createRadialGradient(-6, -8, 3, 0, -2, r * 1.2);
+    grad.addColorStop(0, lighten(p.color, 55));
+    grad.addColorStop(0.55, p.color);
+    grad.addColorStop(1, darkenHex(p.color, 35));
+    ctx.beginPath();
+    ctx.roundRect(-r, -r + 2, r * 2, r * 2 - 10, 7);
     ctx.fillStyle = grad;
     if (isMe) {
       ctx.shadowColor = p.color;
-      ctx.shadowBlur = 20;
+      ctx.shadowBlur = 22;
     }
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Cockpit
+    // Front lip / bumper highlight
     ctx.beginPath();
-    ctx.ellipse(2, 0, 8, 6, 0, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.roundRect(r - 10, -r + 6, 12, r * 2 - 16, 3);
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
     ctx.fill();
 
-    // Wheels
-    [[r - 2, -r + 4], [r - 2, r - 4], [-r + 2, -r + 4], [-r + 2, r - 4]].forEach(([wx, wy]) => {
+    // Cockpit bubble
+    ctx.beginPath();
+    ctx.ellipse(2, -2, 9, 7, 0, 0, Math.PI * 2);
+    const cg = ctx.createRadialGradient(0, -4, 1, 2, -2, 10);
+    cg.addColorStop(0, "rgba(255,255,255,0.45)");
+    cg.addColorStop(0.6, "rgba(0,0,0,0.45)");
+    cg.addColorStop(1, "rgba(0,0,0,0.65)");
+    ctx.fillStyle = cg;
+    ctx.fill();
+
+    // Wheels with rim highlight
+    const wpos = [[r - 1, -r + 5], [r - 1, r - 5], [-r + 1, -r + 5], [-r + 1, r - 5]];
+    wpos.forEach(([wx, wy]) => {
       ctx.beginPath();
       ctx.ellipse(wx, wy, 5, 4, Math.PI / 2, 0, Math.PI * 2);
-      ctx.fillStyle = "#222";
+      ctx.fillStyle = "#151515";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(wx * 0.98, wy * 0.98, 2.2, 1.8, Math.PI / 2, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255,255,255,0.15)";
       ctx.fill();
     });
 
@@ -211,8 +251,8 @@ export function renderGame(ctx, gameState, myId, cameraRef) {
     if (isMe) {
       ctx.beginPath();
       ctx.moveTo(r + 6, 0);
-      ctx.lineTo(r + 14, -5);
-      ctx.lineTo(r + 14, 5);
+      ctx.lineTo(r + 15, -5);
+      ctx.lineTo(r + 15, 5);
       ctx.closePath();
       ctx.fillStyle = "#fff";
       ctx.fill();
@@ -220,9 +260,9 @@ export function renderGame(ctx, gameState, myId, cameraRef) {
 
     ctx.restore();
 
-    // Name tag + HP bar (screen-space labels)
+    // Name tag + HP bar (screen-space labels, follow bob)
     ctx.save();
-    ctx.translate(p.x, p.y);
+    ctx.translate(p.x, p.y + bob);
     const labelY = -r - 22;
 
     // HP bar bg
@@ -269,5 +309,15 @@ function lighten(hex, amount) {
   const r = Math.min(255, (num >> 16) + amount);
   const g = Math.min(255, ((num >> 8) & 0xff) + amount);
   const b = Math.min(255, (num & 0xff) + amount);
+  return `rgb(${r},${g},${b})`;
+}
+
+function darkenHex(hex, amount) {
+  const raw = hex.replace("#", "");
+  const num = parseInt(raw, 16);
+  if (Number.isNaN(num)) return "rgb(30,30,50)";
+  const r = Math.max(0, (num >> 16) - amount);
+  const g = Math.max(0, ((num >> 8) & 0xff) - amount);
+  const b = Math.max(0, (num & 0xff) - amount);
   return `rgb(${r},${g},${b})`;
 }

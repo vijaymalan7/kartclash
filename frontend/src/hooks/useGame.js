@@ -9,8 +9,16 @@ export function useGame() {
   const [connected, setConnected] = useState(false);
   const listenersRef = useRef({});
 
+  /** Register a WS message handler. Returns unsubscribe so effects can avoid duplicates. */
   const on = useCallback((type, fn) => {
-    listenersRef.current[type] = fn;
+    const bucket = listenersRef.current[type] || (listenersRef.current[type] = []);
+    bucket.push(fn);
+    return () => {
+      const b = listenersRef.current[type];
+      if (!b) return;
+      const i = b.indexOf(fn);
+      if (i >= 0) b.splice(i, 1);
+    };
   }, []);
 
   const send = useCallback((obj) => {
@@ -29,8 +37,8 @@ export function useGame() {
     ws.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        const fn = listenersRef.current[data.type];
-        if (fn) fn(data);
+        const bucket = listenersRef.current[data.type];
+        if (bucket?.length) bucket.forEach((fn) => fn(data));
       } catch {}
     };
   }, []);

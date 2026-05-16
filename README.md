@@ -200,3 +200,18 @@ MAX_PLAYERS = 10                 # Players per room
 ITEM_SPAWN_INTERVAL = 8          # Seconds between items
 GAME_TICK = 1 / 30               # Server tick rate
 ```
+
+
+
+
+#---------------------------------------
+to create docker image for backed :
+docker build -t smashkart-backend .
+
+run command:
+docker run -p 8000:8000 smashkart-backend
+
+
+#-----------------------------
+to run the entire application with one command with backend and frontend
+docker compose up
