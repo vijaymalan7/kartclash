@@ -1,5 +1,6 @@
 // src/components/GameScreen.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useFullscreen } from "../hooks/useFullscreen";
 import { useGameVoice } from "../hooks/useGameVoice";
 import { renderGame } from "../game/renderer";
 
@@ -35,6 +36,7 @@ function useNeedsLandscapeLock() {
 }
 
 export default function GameScreen({ gameState, myId, send, onLeave, registerWsHandler }) {
+  const screenRef = useRef(null);
   const canvasRef = useRef(null);
   const canvasWrapRef = useRef(null);
   const keysRef = useRef({});
@@ -50,6 +52,7 @@ export default function GameScreen({ gameState, myId, send, onLeave, registerWsH
     }
   });
   const portraitBlock = useNeedsLandscapeLock();
+  const { fullscreen, toggleFullscreen, enterFullscreen } = useFullscreen();
 
   const [micMuted, setMicMuted] = useState(false);
   const [deafened, setDeafened] = useState(false);
@@ -87,6 +90,27 @@ export default function GameScreen({ gameState, myId, send, onLeave, registerWsH
   const ARENA_W = 1200;
   const ARENA_H = 800;
 
+  // Match visible viewport on mobile (shrinks when URL bar shows/hides)
+  useEffect(() => {
+    const root = screenRef.current;
+    const vv = window.visualViewport;
+    if (!root || !vv) return undefined;
+
+    const sync = () => {
+      root.style.height = `${vv.height}px`;
+      root.style.top = `${vv.offsetTop}px`;
+    };
+    sync();
+    vv.addEventListener("resize", sync);
+    vv.addEventListener("scroll", sync);
+    return () => {
+      vv.removeEventListener("resize", sync);
+      vv.removeEventListener("scroll", sync);
+      root.style.height = "";
+      root.style.top = "";
+    };
+  }, []);
+
   // Prefer landscape on phones (best-effort; may require user gesture / HTTPS)
   useEffect(() => {
     (async () => {
@@ -106,20 +130,45 @@ export default function GameScreen({ gameState, myId, send, onLeave, registerWsH
     };
   }, []);
 
-  // Size canvas to the flex arena (responsive)
+  // Size canvas to the flex arena (responsive; visualViewport tracks mobile browser chrome)
   useEffect(() => {
     const wrap = canvasWrapRef.current;
     const canvas = canvasRef.current;
     if (!wrap || !canvas) return;
-    const ro = new ResizeObserver(() => {
+
+    const syncSize = () => {
       const w = Math.max(1, Math.floor(wrap.clientWidth));
       const h = Math.max(1, Math.floor(wrap.clientHeight));
-      canvas.width = w;
-      canvas.height = h;
-    });
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+    };
+
+    syncSize();
+    const ro = new ResizeObserver(syncSize);
     ro.observe(wrap);
-    return () => ro.disconnect();
+    window.visualViewport?.addEventListener("resize", syncSize);
+    window.visualViewport?.addEventListener("scroll", syncSize);
+    window.addEventListener("resize", syncSize);
+    return () => {
+      ro.disconnect();
+      window.visualViewport?.removeEventListener("resize", syncSize);
+      window.visualViewport?.removeEventListener("scroll", syncSize);
+      window.removeEventListener("resize", syncSize);
+    };
   }, []);
+
+  // Best-effort fullscreen once the player touches the arena (user gesture required)
+  useEffect(() => {
+    const wrap = canvasWrapRef.current;
+    if (!wrap || fullscreen) return;
+    const onFirstPlay = () => {
+      enterFullscreen();
+    };
+    wrap.addEventListener("pointerdown", onFirstPlay, { once: true });
+    return () => wrap.removeEventListener("pointerdown", onFirstPlay);
+  }, [fullscreen, enterFullscreen]);
 
   // Key handling
   const KEY_MAP = {
@@ -253,7 +302,7 @@ export default function GameScreen({ gameState, myId, send, onLeave, registerWsH
   };
 
   return (
-    <div className="game-screen">
+    <div ref={screenRef} className="game-screen">
       {portraitBlock && (
         <div className="rotate-device-overlay" role="dialog" aria-modal="true" aria-label="Rotate device">
           <div className="rotate-device-card">
@@ -350,23 +399,20 @@ export default function GameScreen({ gameState, myId, send, onLeave, registerWsH
           <span className="hud-map-toggle__icon" aria-hidden>🗺️</span>
           <span className="hud-map-toggle__txt">{showMinimap ? "On" : "Off"}</span>
           </button>
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost hud-fs-btn"
+            onClick={toggleFullscreen}
+            aria-pressed={fullscreen}
+            title={fullscreen ? "Exit fullscreen" : "Fullscreen (hides browser bar)"}
+          >
+            {fullscreen ? "⤢" : "⛶"}
+          </button>
           <button type="button" className="btn btn-sm btn-ghost" onClick={onLeave}>⏸ Leave</button>
         </div>
       </div>
 
       <div className="game-arena">
-        <div className="game-arena__frame" aria-hidden>
-          <div className="game-arena__grid" />
-          <div className="game-arena__rings" />
-        </div>
-        <div className="game-arena__corner-kart" aria-hidden>
-          <div className="game-arena__corner-kart-spin">
-            <span className="corner-kart__chassis" />
-            <span className="corner-kart__fin" />
-            <span className="corner-kart__wheel corner-kart__wheel--a" />
-            <span className="corner-kart__wheel corner-kart__wheel--b" />
-          </div>
-        </div>
         <div ref={canvasWrapRef} className="game-canvas-wrap">
           <canvas ref={canvasRef} className="game-canvas" />
         </div>
